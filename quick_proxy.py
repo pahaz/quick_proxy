@@ -87,7 +87,7 @@ class Proxy(Thread):
         while True:
             vaild_sockets = client_sockets | server_sockets
             # clean up closed socket-pairs
-            for s in list(socket_pairs.pairs):
+            for s in socket_pairs.pairs.keys():
                 if (s in socket_pairs.pairs and
                     s not in vaild_sockets and
                     socket_pairs.get_pair(s) in socket_pairs.pairs and
@@ -97,16 +97,16 @@ class Proxy(Thread):
             # clean up unused datas to send
             vaild_sockets = socket_pairs.pairs
 
-            for s in list(data_to_send):
+            for s in data_to_send.keys():
                 if s not in vaild_sockets:
                     del data_to_send[s]
 
-            for s in list(socket_to_dumper):
+            for s in socket_to_dumper.keys():
                 if s not in vaild_sockets:
                     del socket_to_dumper[s]
 
             try:
-                want_read = set([proxy]) | client_sockets | server_sockets
+                want_read = set( [proxy] ) | client_sockets | server_sockets
                 have_out_data = [s for s in data_to_send if data_to_send[s]]
                 want_write = set(have_out_data)
 
@@ -206,11 +206,15 @@ class Proxy(Thread):
 
                 data_to_send[s] = data_to_send[s][sent:]
 
-for listen_port, sockaddr in PROXYMAPS.items():
-    server_host, server_port = sockaddr
-    p = Proxy(listen_port, server_host, server_port)
-    p.daemon = True
-    p.start()
+def main():
+    for listen_port, sockaddr in PROXYMAPS.items():
+        server_host, server_port = sockaddr
+        p = Proxy(listen_port, server_host, server_port)
+        p.daemon = True
+        p.start()
 
-while True:
-    sleep(1337)
+    while True:
+        sleep(1337)
+
+if __name__ == '__main__':
+    main()

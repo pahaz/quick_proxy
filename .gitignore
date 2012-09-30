@@ -1,0 +1,7 @@
+.idea
+.svn
+*.pyc
+*.db
+settings_add/production
+settings_add/local
+*~
