@@ -135,6 +135,12 @@ class NoBlockProxy(object):
             self.__log.critical('IPv6 is not supported on this platform but you proxy bind address is IPv6')
             raise ValueError('IPv6 is not supported on this platform but you bind address is IPv6')
 
+        # check support IPv6 in forward
+        proxy_family = socket.AF_INET6 if ":" in forward_host else socket.AF_INET
+        if not socket.has_ipv6 and proxy_family == socket.AF_INET6:
+            self.__log.critical('IPv6 is not supported on this platform but you forward bind address is IPv6')
+            raise ValueError('IPv6 is not supported on this platform but you forward bind address is IPv6')
+
         try:
             self.proxy = socket.socket(proxy_family, self.proxy_socket_type)
         except socket.error, e:
@@ -154,7 +160,7 @@ class NoBlockProxy(object):
         except socket.error, e:
             self.proxy.close()
             self.__log.critical('error on initial proxy: %s' % (e,))
-            raise IOError('error on initial proxy')
+            raise e # ('error on initial proxy')
 
         self.proxy_init = True
 
