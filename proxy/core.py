@@ -1,3 +1,7 @@
+import importlib
+import os
+import sys
+
 __author__ = 'pahaz'
 
 import threading
@@ -7,8 +11,17 @@ import socket
 import errno
 from collections import deque
 
+import traceback
+
 from proxy.utils import get_sock_settings
 from proxy.utils import hexdump
+
+LEVELS = { 'debug':logging.DEBUG,
+           'info':logging.INFO,
+           'warning':logging.WARNING,
+           'error':logging.ERROR,
+           'critical':logging.CRITICAL,
+           }
 
 class NoBlockProxy(object):
     """
@@ -59,6 +72,10 @@ class NoBlockProxy(object):
         self.__log.addHandler(handler)
 
     def set_proxy_core_log_level(self, lvl):
+        if type(lvl) == str:
+            lvl = LEVELS.get(lvl)
+            if not lvl:
+                return
         self.__log.setLevel(lvl)
 
     def get_forwarding_address(self):
@@ -84,6 +101,12 @@ class NoBlockProxy(object):
         self.__log = logging.getLogger('proxy[%s]' % (proxy_port, ))
         self.__is_shut_down = threading.Event()
         self.__shutdown_request = False
+
+        # for public use and override use
+        self.proxy_port = proxy_port
+        self.forward_host = forward_host
+        self.forward_port = forward_port
+
 
         self.proxy_init = False
         self.forwarding_address_resolved = False
@@ -139,7 +162,8 @@ class NoBlockProxy(object):
         try:
             self.on__init()
         except Exception, e:
-            self.__log.critical('on__init() error: %s' % (e,))
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            self.__log.critical('on__init() error: %s; Traceback: %r' % (e, traceback.extract_tb(exc_traceback, 10)))
 
 
     def serve_forever(self, poll_interval=-1):
@@ -171,6 +195,9 @@ class NoBlockProxy(object):
                 except:
                     log.warning('find bead: %s' % (id(s),))
                     outputs.remove(s)
+
+        def psock(lst):
+            return str([id(x) for x in lst])
 
         self.__is_shut_down.clear()
 
@@ -206,16 +233,12 @@ class NoBlockProxy(object):
             def __init__(self, pair, id, address, proxy_address, type, pair_id, pair_address, pair_proxy_address):
                 self.pair = pair
                 self.message_queues = deque()
+                self.tail_sending = None # to send the remainder if no send in one package
                 super(SockInfo, self).__init__(id, address, proxy_address, type, pair_id, pair_address,
                     pair_proxy_address)
 
         def get_socket_info(s):
-            info = sock_info[s]
-            self.__log.debug(
-                'socket info: id=%s; address=%s; proxy_address=%s; pair_id=%s; pair_address=%s, pair_proxy_address=%s, type=%s, message_queues=%s' % (
-                    info.id, info.address, info.proxy_address, info.pair_id, info.pair_address, info.pair_proxy_address,
-                    info.type, info.message_queues))
-            return info
+            return sock_info[s]
 
         def set_socket_info(s, id, address, proxy_address, pair, pair_id, pair_address, pair_proxy_address, type):
             new_sock_info = SockInfo(pair, id, address, proxy_address, type, pair_id, pair_address, pair_proxy_address)
@@ -232,11 +255,18 @@ class NoBlockProxy(object):
         def closing_pair(s):
             info = get_socket_info(s)
 
+            if info.tail_sending:
+                self.__log.error('closing socket with tail: "%s" bytes' % (len(info.tail_sending),))
+
+            if info.message_queues:
+                self.__log.warning('closing socket with message_queues: "%s" messages' % (len(info.message_queues),))
+
             # trigger event
             try:
-                self.on__connection_close(info.public())
+                self.on__connection_close(info.public(), info.tail_sending, info.message_queues)
             except Exception, e:
-                self.__log.critical('on__connection_close() error: %s' % (e,))
+                exc_type, exc_value, exc_traceback = sys.exc_info()
+                self.__log.critical('on__connection_close() error: %s; Traceback: %r' % (e, traceback.extract_tb(exc_traceback, 10)))
 
             s.close()
             inputs.remove(s)
@@ -256,7 +286,8 @@ class NoBlockProxy(object):
                     self.__log.info('drop new connection %s by filter' % (client_address,))
                     return
             except Exception, e:
-                self.__log.critical('filter__accept_connection() error: %s' % (e,))
+                exc_type, exc_value, exc_traceback = sys.exc_info()
+                self.__log.critical('filter__accept_connection() error: %s; Traceback: %r' % (e, traceback.extract_tb(exc_traceback, 10)))
                 return
 
             client.setblocking(0)
@@ -294,7 +325,8 @@ class NoBlockProxy(object):
             try:
                 self.on__accept_proxy_connection(client_info.public(), forward_info.public())
             except Exception, e:
-                self.__log.critical('on__accept_proxy_connection() error: %s' % (e,))
+                exc_type, exc_value, exc_traceback = sys.exc_info()
+                self.__log.critical('on__accept_proxy_connection() error: %s; Traceback: %r' % (e, traceback.extract_tb(exc_traceback, 10)))
 
         try:
             while not self.__shutdown_request and inputs:
@@ -304,13 +336,14 @@ class NoBlockProxy(object):
                 # shutdown request and wastes cpu at all other times.
 
                 # Wait for at least one of the sockets to be ready for processing
-                self.__log.debug("waiting for the next event; inputs = %r; outputs = %r; " % (inputs, outputs))
+                self.__log.debug("waiting for the next event; inputs = %r; outputs = %r; " % (psock(inputs), psock(outputs)))
 
                 # trigger event
                 try:
                     self.on__start_event_loop()
                 except Exception, e:
-                    self.__log.critical('on__start_event_loop() error: %s' % (e,))
+                    exc_type, exc_value, exc_traceback = sys.exc_info()
+                    self.__log.critical('on__start_event_loop() error: %s Traceback: %r' % (e, traceback.extract_tb(exc_traceback, 10)))
 
                 try:
                     readable, writable, exceptional = select.select(inputs, outputs, inputs, poll_interval)
@@ -320,7 +353,7 @@ class NoBlockProxy(object):
                     continue
 
                 self.__log.debug("event has occurred; readable = %r; writable = %r; exceptional = %r;" % (
-                    readable, writable, exceptional))
+                    psock(readable), psock(writable), psock(exceptional)))
 
                 if not inputs and not outputs and not exceptional:
                     self.__log.debug('no event')
@@ -367,12 +400,13 @@ class NoBlockProxy(object):
                         try:
                             filtered_data = self.filter__recv_data(data, info.public())
                         except Exception, e:
-                            self.__log.critical('filter__recv_data() error: %s', e)
+                            exc_type, exc_value, exc_traceback = sys.exc_info()
+                            self.__log.critical('filter__recv_data() error: %s; Traceback: %r' % (e, traceback.extract_tb(exc_traceback, 10)))
                             filtered_data = data
-
-                        self.__log.info('after filtering "%r" bytes from (%s) -socket> (proxy.socket%s)' % (
-                            len(data), info.address, info.proxy_address))
-                        self.__log.debug('after filtering: %s', hexdump(filtered_data, 0))
+                        else:
+                            self.__log.info('after filtering "%r" bytes from (%s) -socket> (proxy.socket%s)' % (
+                                len(filtered_data), info.address, info.proxy_address))
+                            self.__log.debug('after filtering: %s', hexdump(filtered_data, 0))
 
                         # append message to pair queues if pair not closed
                         pair_socket_live = is_live_socket(info.pair)
@@ -397,7 +431,38 @@ class NoBlockProxy(object):
                 # Handle outputs
                 for s in writable:
                     info = get_socket_info(s)
-                    if info.message_queues:
+                    if info.message_queues or info.tail_sending:
+
+                        # first tail sending (sending old date)
+                        if info.tail_sending:
+                            self.__log.info('tail sending "%r" bytes to (%s) <socket- (proxy.socket%s)' % (
+                                len(info.tail_sending), info.address, info.proxy_address))
+
+                            try:
+                                send = s.send(info.tail_sending)
+
+                                # detect new tail
+                                if len(info.tail_sending) != send:
+                                    new_tail = info.tail_sending[send:]
+                                    self.__log.info('tail on (tail) sending: "%r" bytes to (%s) <socket- (proxy.socket%s)' % (
+                                        len(new_tail), info.address, info.proxy_address))
+                                    info.tail_sending = new_tail
+                                else:
+                                    info.tail_sending = None
+
+                            except socket.error, e:
+                                self.__log.error(
+                                    '[client %s <socket- proxy.socket%s].send() on tail except: errno = %s, msg = %r' % (
+                                        info.address, info.proxy_address, e.errno, e.message))
+
+                                self.__log.info('closing pair (%s) <socket- (proxy.socket%s) after send tail error' % (
+                                    info.address, info.proxy_address))
+                                closing_pair(s)
+
+                                if s in exceptional: writable.remove(s)
+
+                            continue
+
                         next_msg = info.message_queues.popleft()
                         self.__log.info('sending "%r" bytes to (%s) <socket- (proxy.socket%s)' % (
                             len(next_msg), info.address, info.proxy_address))
@@ -407,11 +472,13 @@ class NoBlockProxy(object):
                         try:
                             filtered_next_msg = self.filter__send_data(next_msg, info.public())
                         except Exception, e:
-                            self.__log.critical('filter__send_data() error: %s', e)
-
-                        self.__log.info('after filtering "%r" bytes from (%s) <socket- (proxy.socket%s)' % (
-                            len(filtered_next_msg), info.address, info.proxy_address))
-                        self.__log.debug('after filtering: %s', hexdump(filtered_next_msg, 0))
+                            exc_type, exc_value, exc_traceback = sys.exc_info()
+                            self.__log.critical('filter__send_data() error: %s; Traceback: %r' % (e, traceback.extract_tb(exc_traceback, 10)))
+                            filtered_next_msg = next_msg
+                        else:
+                            self.__log.info('after filtering "%r" bytes from (%s) <socket- (proxy.socket%s)' % (
+                                len(filtered_next_msg), info.address, info.proxy_address))
+                            self.__log.debug('after filtering: %s', hexdump(filtered_next_msg, 0))
 
                         # if pair close connection
                         if not filtered_next_msg:
@@ -423,7 +490,15 @@ class NoBlockProxy(object):
 
                         else:
                             try:
-                                s.send(filtered_next_msg)
+                                sendet = s.send(filtered_next_msg)
+
+                                # detect tail on send
+                                if sendet != len(filtered_next_msg):
+                                    new_tail = filtered_next_msg[sendet:]
+                                    self.__log.info('tail on sending: "%r" bytes to (%s) <socket- (proxy.socket%s)' % (
+                                        len(new_tail), info.address, info.proxy_address))
+                                    info.tail_sending = new_tail
+
                             except socket.error, e:
                                 self.__log.error(
                                     '[client %s <socket- proxy.socket%s].send() except: errno = %s, msg = %r' % (
@@ -488,7 +563,7 @@ class NoBlockProxy(object):
     def filter__send_data(self, data, sock_info):
         return data
 
-    def on__connection_close(self, sock_info):
+    def on__connection_close(self, sock_info, sending_tail, message_queues):
         pass
 
     def on__start_event_loop(self):
@@ -504,43 +579,59 @@ class NoBlockProxy(object):
 # python -m proxy.core
 #------------------------------------------------------
 if __name__ == "__main__":
-    import sys, os
+    examples = """example:
+ {0} -l critical 8000 "hackerdom.ru:80";
+ {0} "192.168.0.101:8000" "hackerdom.ru:80";
+If you have any problem write them on http://github.com/pahaz/
+""".format(os.path.split(sys.argv[0])[1])
 
-    if len(sys.argv) == 5:
-        # {0} PROXY_PORT to HOST PORT
-        if sys.argv[2].lower() != 'to':
-            print("Error use: key word 'to' missed")
-            sys.exit(1)
 
-        HOST = sys.argv[3]
-        PORT = int(sys.argv[4])
-        PROXY_PORT = int(sys.argv[1])
-        PROXY_HOST = "0.0.0.0"
+    level_name = 'critical'
 
-    elif len(sys.argv) == 6:
-        # {0} PROXY_IP PROXY_PORT to HOST PORT
-        if sys.argv[3].lower() != 'to':
-            print("Error use: key word 'to' missed")
-            sys.exit(1)
+    import argparse
+    from proxy import ext
 
-        HOST = sys.argv[4]
-        PORT = int(sys.argv[5])
-        PROXY_PORT = int(sys.argv[2])
-        PROXY_HOST = sys.argv[1]
+    parser = argparse.ArgumentParser(description="This TCP proxy server is no blocking and use select.", epilog=examples)
+    parser.add_argument("proxy", help="the proxy \"ip:port\"")
+    parser.add_argument("destination", help="the destination \"host:port\"")
+    parser.add_argument("module", nargs='?', help="the extension proxy class", default="NoBlockProxy")
+    parser.add_argument('-l', '--core-log-level', help='level core logging; if default module then level debug else level critical')
+    args = parser.parse_args()
 
+    print args
+
+    if ':' in args.proxy:
+        PROXY_HOST, PROXY_PORT = args.proxy.split(':',1)#"0.0.0.0"
     else:
-        print("""
-        Uses:
-            {0} [PROXY_IP] PROXY_PORT to HOST PORT
+        PROXY_HOST, PROXY_PORT = "0.0.0.0", args.proxy
 
-        Example:
-            {0} 8000 to hackerdom.ru 80
-            {0} 192.168.0.101 8000 to hackerdom.ru 80
-        """.format(os.path.split(sys.argv[0])[1]))
+    PROXY_PORT = int(PROXY_PORT)
+
+    if ':' in args.destination:
+        HOST, PORT = args.destination.split(':',1) # "0.0.0.0"
+    else:
+        print "error parse destination HOST_DNS:HOST_PORT"
         sys.exit(1)
 
+    PORT = int(PORT)
+
+    CLS = NoBlockProxy
+    if args.module != "NoBlockProxy":
+        try:
+            CLS = getattr(ext, args.module)
+        except:
+            print "error import module: %s" % (args.module,)
+            sys.exit(1)
+    else:
+        level_name = 'debug'
+
+    if args.core_log_level:
+        level_name = args.core_log_level
+
+    level = LEVELS.get(level_name, logging.NOTSET)
+
     logging.basicConfig(format="%(created)-15f:%(levelname)7s:%(name)s: %(message)s")
-    p = NoBlockProxy(PROXY_HOST, PROXY_PORT, HOST, PORT, False)
-    p.set_proxy_core_log_level(logging.DEBUG)
+    p = CLS(PROXY_HOST, PROXY_PORT, HOST, PORT, False)
+    p.set_proxy_core_log_level(level)
     p.init()
     p.serve_forever()
