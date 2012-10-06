@@ -21,7 +21,7 @@ class Dumper:
 
     def dump(self, title, data):
         if not self.__closed:
-            self.file.write('\n%s "%s" bytes\n' % (title, len(data)))
+            self.file.write('\n%s\n' % (title, ))
             self.file.write(data)
 
     def close(self):

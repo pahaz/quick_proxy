@@ -543,7 +543,16 @@ class NoBlockProxy(object):
             self.proxy.close()
             self.__shutdown_request = False
             self.__is_shut_down.set()
+
+            # trigger event
+            try:
+                self.on__stop()
+            except Exception, e:
+                exc_type, exc_value, exc_traceback = sys.exc_info()
+                self.__log.critical('on__stop() error: %s; Traceback: %r' % (e, traceback.extract_tb(exc_traceback, 10)))
+
             self.__log.info('stop proxy')
+
 
     def shutdown(self):
         """Stops the serve_forever loop.
@@ -576,6 +585,9 @@ class NoBlockProxy(object):
         pass
 
     def on__init(self):
+        pass
+
+    def on__stop(self):
         pass
 
 
