@@ -1,4 +1,3 @@
-import importlib
 import os
 import sys
 
@@ -220,14 +219,14 @@ class NoBlockProxy(object):
             return type('PublicSockInfo', (), enums)
 
         class PublicSockInfo(object):
-            def __init__(self, id, address, proxy_address, type, pair_id, pair_address, pair_proxy_address):
-                self.__public_info = enum(id=id, address=address, proxy_address=proxy_address, type=type,
+            def __init__(self, id, address, proxy_address, is_client, pair_id, pair_address, pair_proxy_address):
+                self.__public_info = enum(id=id, address=address, proxy_address=proxy_address, is_client=is_client,
                     pair_id=pair_id,
                     pair_address=pair_address, pair_proxy_address=pair_proxy_address)
                 self.id = id
                 self.address = address
                 self.proxy_address = proxy_address
-                self.type = type
+                self.is_client = is_client
                 self.pair_id = pair_id
                 self.pair_address = pair_address
                 self.pair_proxy_address = pair_proxy_address
@@ -236,18 +235,18 @@ class NoBlockProxy(object):
                 return self.__public_info
 
         class SockInfo(PublicSockInfo):
-            def __init__(self, pair, id, address, proxy_address, type, pair_id, pair_address, pair_proxy_address):
+            def __init__(self, pair, id, address, proxy_address, is_client, pair_id, pair_address, pair_proxy_address):
                 self.pair = pair
                 self.message_queues = deque()
                 self.tail_sending = None # to send the remainder if no send in one package
-                super(SockInfo, self).__init__(id, address, proxy_address, type, pair_id, pair_address,
+                super(SockInfo, self).__init__(id, address, proxy_address, is_client, pair_id, pair_address,
                     pair_proxy_address)
 
         def get_socket_info(s):
             return sock_info[s]
 
-        def set_socket_info(s, id, address, proxy_address, pair, pair_id, pair_address, pair_proxy_address, type):
-            new_sock_info = SockInfo(pair, id, address, proxy_address, type, pair_id, pair_address, pair_proxy_address)
+        def set_socket_info(s, id, address, proxy_address, pair, pair_id, pair_address, pair_proxy_address, is_client):
+            new_sock_info = SockInfo(pair, id, address, proxy_address, is_client, pair_id, pair_address, pair_proxy_address)
             sock_info[s] = new_sock_info
             return new_sock_info
 
@@ -322,10 +321,10 @@ class NoBlockProxy(object):
             inputs.append(forward)
 
             client_info = set_socket_info(client, client_id, client_address, client_proxy_address, forward, forward_id,
-                forward_address, forward_proxy_address, 'client')
+                forward_address, forward_proxy_address, True)
             forward_info = set_socket_info(forward, forward_id, forward_address, forward_proxy_address, client,
                 client_id,
-                client_address, client_proxy_address, 'forward')
+                client_address, client_proxy_address, False)
 
             # trigger event
             try:

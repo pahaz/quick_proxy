@@ -107,16 +107,139 @@
     127.0.0.1:64207  --*-34824008-- [8000 PROXY 64208] <<*-34824064-- 172.16.10.245:80 26b
     *********** бинарные данные ***********
 
+
 # Написание своего прокси сервера #
-Нужно разобрать простой пример.
+Нужно разобрать простой пример. Все комментарии по ходу примера.
+
+    from proxy.core import NoBlockProxy
+
+    class ExampleProxy(NoBlockProxy):
+        '''
+        [CLIENT] <--client-socket--> [PROXY server] <--forward-socket--> [FORWARD host]
+
+        Как видно на схеме, наш прокси cервер ([PROXY server]) соединяет клиентов ([CLIENT])
+        с сервером назначения ([FORWARD host]) через себя.
+
+        На каждое соединение у нас выделяется 2 сокета, один для общения CLIENT и PROXY, второй
+        для общения PROXY и FORWARD, тем самым мы имеем *пару* (client-socket, forward-socket).
+
+        Каждый сокет описывается следующей структурой:
+
+                class PublicSockInfo(object):
+
+                    # Идентификатор сокета. Число, используемое для объекта socket. (id(socket))
+                    self.id = int
+                    # Адрес, с которого производится соединение.
+                    self.address = tuple( 'xxx.xxx.xxx.xxx', int(port) )
+                    # Адрес на прокси сервере, куда происходит соединение.
+                    self.proxy_address = tuple( 'xxx.xxx.xxx.xxx', int(port) )
+                    # Логическое значение. True - клиентский сокет.
+                    self.is_client = bool
+                    # Идентификатор парного сокета.
+                    self.pair_id = int
+                    # Адрес, с которого производится соединение на парном сокете.
+                    self.pair_address = tuple( 'xxx.xxx.xxx.xxx', int(port) )
+                    # Адрес на прокси сервере, с которым соединен парный сокет.
+                    self.pair_proxy_address = tuple( 'xxx.xxx.xxx.xxx', int(port) )
+
+        Итак, каждое соединение CLIENT с FORWARD сервером, представлено двумя экземплярами класса
+        PublicSockInfo, один экземпляр для client-socket, второй для forward-socket, образуя пару
+        (client-socket-info, forward-socket-info).
+
+        client-socket-info, forward-socket-info используются в качестве аргументов для функций событий
+        и функций фильтров. Изменения, произведенные с данными объектами не повлияют на ход работы прокси
+        сервера.
+
+        Пример использования:
+
+                # False argument - no auto init call
+                proxy = ExampleProxy(PROXY_HOST, PROXY_PORT, HOST, PORT, False)
+                proxy.init() # start proxy inicialization and call on__init()
+                proxy.serve_forever() # start proxy forever
+                                      # on each iteration trigger on__start_event_loop()
 
 
+        '''
+        def on__init(self, *args):
+            '''
+            Функция событие.
+            Вызывается в конце функции proxy.init()
+            '''
 
+        def on__stop(self, *args):
+            """
+            Функция событие.
+            Вызывается в конце функции serve_forever(), если работу прокси сервера необходимо остановить.
+            (Например причиной остановки может стать непредвиденная ошибка)
+            """
 
+        def on__accept_proxy_connection(self, client_sock_info, forward_sock_info, *args):
+            """
+            Функция событие.
+            Вызывается, когда прокси сервер принял новое соединение (proxy.accept()).
+            Данное событие происходит после вызова фильтра filter__accept_connection().
 
+            @client_sock_info - PublicSocketInfo объект для CLIENT socket.
+            @forward_sock_info - PublicSocketInfo объект для FORWARD socket.
+            """
 
+        def filter__accept_connection(self, client_socket_id, client_address, client_proxy_address, *args):
+            """
+            Функция фильтр.
+            Вызывается, когда прокси сервер принимает новое соединение (proxy.accept()).
 
+            Результатом работы функции должно быть логические значение.
+            False - новое соединение будет закрыто.
+            True - принять соединение от клиента и создать новое парное соединение с FORWARD сервером.
+            После чего произойдет вызов события on__accept_proxy_connection.
 
+            @client_socket_id - идентификатор сокета
+            @client_address - tuple( 'xxx.xxx.xxx.xxx', int(port) ) клиента.
+            @client_proxy_address - tuple( 'xxx.xxx.xxx.xxx', int(port) ) прокси сервера.
+            """
+            return True
+
+        def filter__recv_data(self, data, sock_info, *args):
+            """
+            Функция фильтр.
+            Вызывается, когда сокет (client или forward) получает какие-то данные (socket.recv()).
+
+            Результатом работы функции должны быть отфильтрованные данные.
+            (Пустая тройка - знак завершения соединения).
+
+            @data - полученные данные
+            @sock_info - PublicSocketInfo объект для сокета.
+            """
+            return data
+
+        def filter__send_data(self, data, sock_info, *args):
+            """
+            Функция фильтр.
+            Вызывается, когда сокет (client или forward) отправляет какие-то данные (socket.send()).
+
+            Результатом работы функции должны быть отфильтрованные данные.
+            (Пустая тройка - знак завершения соединения).
+
+            @data - отправляемые данные
+            @sock_info - PublicSocketInfo объект для сокета.
+            """
+            return data
+
+        def on__connection_close(self, sock_info, sending_tail, message_queues, *args):
+            """
+            Функция событие.
+            Вызывается когда сокет (client или forward) закрывает соединение.
+
+            @sock_info - PublicSocketInfo объект для сокета.
+            @sending_tail - не отправленный хвост последнего сообщения или None, если последнее сообщение полностью отправилось.
+            @message_queues - очередь сообщений, которые не успели отправиться. (deque() from collections)
+            """
+
+        def on__start_event_loop(self, *args):
+            """
+            Функция событие.
+            Вызывается на каждой итерации опроса клиентов в функции serve_forever().
+            """
 
 # Quick proxy eng #
 
