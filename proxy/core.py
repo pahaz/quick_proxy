@@ -22,6 +22,19 @@ LEVELS = { 'debug':logging.DEBUG,
            'critical':logging.CRITICAL,
            }
 
+class PublicSockInfo(object):
+    def __init__(self, _public_sock_, _public_sock_pair_, is_client):
+        id, address, proxy_address = _public_sock_
+        pair_id, pair_address, pair_proxy_address = _public_sock_pair_
+
+        self.id = id
+        self.address = address
+        self.proxy_address = proxy_address
+        self.is_client = is_client
+        self.pair_id = pair_id
+        self.pair_address = pair_address
+        self.pair_proxy_address = pair_proxy_address
+
 class NoBlockProxy(object):
     """
     Core for different proxy servers.
@@ -184,6 +197,8 @@ class NoBlockProxy(object):
         if not self.proxy_init:
             raise ValueError("proxy not init!")
 
+        CLOSE_MESSAGE = ""
+
         # small utils
         def clear_bead_socket(inputs, outputs, log):
             log.info("cleaning bead sockets")
@@ -215,38 +230,37 @@ class NoBlockProxy(object):
         # socket info (socket -> SockInfo()
         sock_info = {}
 
-        def enum(**enums):
-            return type('PublicSockInfo', (), enums)
-
-        class PublicSockInfo(object):
-            def __init__(self, id, address, proxy_address, is_client, pair_id, pair_address, pair_proxy_address):
-                self.__public_info = enum(id=id, address=address, proxy_address=proxy_address, is_client=is_client,
-                    pair_id=pair_id,
-                    pair_address=pair_address, pair_proxy_address=pair_proxy_address)
-                self.id = id
-                self.address = address
-                self.proxy_address = proxy_address
-                self.is_client = is_client
-                self.pair_id = pair_id
-                self.pair_address = pair_address
-                self.pair_proxy_address = pair_proxy_address
-
-            def public(self):
-                return self.__public_info
-
         class SockInfo(PublicSockInfo):
-            def __init__(self, pair, id, address, proxy_address, is_client, pair_id, pair_address, pair_proxy_address):
+            def __init__(self, _sock_, _sock_pair_, is_client):
+                pair, pair_id, pair_address, pair_proxy_address = _sock_pair_
+                sock, sock_id, sock_address, sock_proxy_address = _sock_
                 self.pair = pair
+                self.sock = sock
                 self.message_queues = deque()
                 self.tail_sending = None # to send the remainder if no send in one package
-                super(SockInfo, self).__init__(id, address, proxy_address, is_client, pair_id, pair_address,
-                    pair_proxy_address)
+                self.shutdown_message_in_queue = False # need for close pair, if self sock close
+
+                _public_sock_ = _sock_[1:]
+                _public_sock_pair_ = _sock_pair_[1:]
+
+                self.__public_info = PublicSockInfo(_public_sock_, _public_sock_pair_, is_client)
+
+                super(SockInfo, self).__init__(_public_sock_, _public_sock_pair_, is_client)
+
+            def public(self):
+                """
+                Return public object for represent socket in event functions.
+                Need for stability core work.
+                """
+                return self.__public_info
 
         def get_socket_info(s):
             return sock_info[s]
 
         def set_socket_info(s, id, address, proxy_address, pair, pair_id, pair_address, pair_proxy_address, is_client):
-            new_sock_info = SockInfo(pair, id, address, proxy_address, is_client, pair_id, pair_address, pair_proxy_address)
+            sock_in = (s, id, address, proxy_address)
+            sock_pair = (pair, pair_id, pair_address, pair_proxy_address)
+            new_sock_info = SockInfo(sock_in, sock_pair, is_client)
             sock_info[s] = new_sock_info
             return new_sock_info
 
@@ -254,7 +268,45 @@ class NoBlockProxy(object):
             return s in sock_info
 
         def append_in_socket_message_queues(s, data):
-            sock_info[s].message_queues.append(data)
+                socket_live = is_live_socket(s)
+                if socket_live:
+                    info = get_socket_info(s)
+
+                    if data:
+                        info.message_queues.append(data)
+
+                    else:
+                        append_close_in_socket_message_queues(s, info)
+
+                else:
+                    self.__log.warning('recv pair is closed')
+
+                # Add output channel for response
+                if s not in outputs and socket_live:
+                    outputs.append(s)
+
+        def append_close_in_socket_message_queues(s, info=None):
+            """
+            Try append close message in socket s.
+
+            Note: If info then socket is live and info_sock_object already get in up.
+            """
+            # TODO: design code refactor
+            if info:
+                # recv empty data, append close message
+                if not info.shutdown_message_in_queue:
+                    info.message_queues.append(CLOSE_MESSAGE)
+                    info.shutdown_message_in_queue = True
+
+            else:
+                socket_live = is_live_socket(s)
+                if socket_live:
+                    info = get_socket_info(s)
+
+                    # recv empty data, append close message
+                    if not info.shutdown_message_in_queue:
+                        info.message_queues.append(CLOSE_MESSAGE)
+                        info.shutdown_message_in_queue = True
 
         # circuit for pairs inputs outputs for simplify logic
         def closing_pair(s):
@@ -272,6 +324,9 @@ class NoBlockProxy(object):
             except Exception, e:
                 exc_type, exc_value, exc_traceback = sys.exc_info()
                 self.__log.critical('on__connection_close() error: %s; Traceback: %r' % (e, traceback.extract_tb(exc_traceback, 10)))
+
+            # append_close_message(s.pair)
+            append_close_in_socket_message_queues(info.pair)
 
             s.close()
             inputs.remove(s)
@@ -385,6 +440,7 @@ class NoBlockProxy(object):
 
                     try:
                         data = s.recv(65536)
+
                     except socket.error as e:
                         self.__log.error('[client %s -socket-> proxy.socket%s].recv() except: errno = %s, msg = %r' % (
                             info.address, info.proxy_address, e.errno, e.message))
@@ -397,6 +453,7 @@ class NoBlockProxy(object):
                         if s in exceptional: writable.remove(s)
 
                     else:
+
                         self.__log.info('received "%r" bytes  from (%s) -socket> (proxy.socket%s)' % (
                             len(data), info.address, info.proxy_address))
                         self.__log.debug('received: %s' % (hexdump(data, 0),))
@@ -414,19 +471,11 @@ class NoBlockProxy(object):
                             self.__log.debug('after filtering: %s', hexdump(filtered_data, 0))
 
                         # append message to pair queues if pair not closed
-                        pair_socket_live = is_live_socket(info.pair)
-                        if pair_socket_live:
-                            append_in_socket_message_queues(info.pair, filtered_data)
-                        else:
-                            self.__log.warning('recv pair is closed')
-
-                        # Add output channel for response
-                        if info.pair not in outputs and pair_socket_live:
-                            outputs.append(info.pair)
+                        append_in_socket_message_queues(info.pair, filtered_data)
 
                         # Interpret empty result as closed connection
                         if not filtered_data:
-                            self.__log.info('closing pair 1 (%s) -socket> (proxy.socket%s) after reading no data' % (
+                            self.__log.info('closing pair 1 (%s) -socket> (proxy.socket%s) after reading empty data' % (
                                 info.address, info.proxy_address))
                             closing_pair(s)
 
@@ -468,6 +517,7 @@ class NoBlockProxy(object):
 
                             continue
 
+                        # get next message from queue if no tail_sanding and fite them
                         next_msg = info.message_queues.popleft()
                         self.__log.info('sending "%r" bytes to (%s) <socket- (proxy.socket%s)' % (
                             len(next_msg), info.address, info.proxy_address))
